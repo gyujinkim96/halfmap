@@ -22,6 +22,7 @@
 #include <linux/pm_qos.h>
 #include <linux/ratelimit.h>
 #include <asm/unaligned.h>
+// #include <linux/halfmap.h>
 
 #include "nvme.h"
 #include "fabrics.h"
@@ -922,8 +923,20 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 		struct request *req, struct nvme_command *cmnd,
 		enum nvme_opcode op)
 {
+	// bool half_ftl = true;
 	u16 control = 0;
 	u32 dsmgmt = 0;
+	// struct nvme_ctrl *ctrl = ns->ctrl;
+	// struct bio *bio = req->bio;
+	// struct halfmap_private *pri = bio->bi_private;
+
+	// printk(KERN_ERR "setting up rw: half_ftl=%u", half_ftl);
+
+	// if (ctrl->subsys != NULL) {
+	// 	// half_ftl = (ctrl->vendor_id == 0xcafe);
+	// 	// printk("nvme-core: half_ftl: %d\n", half_ftl);
+	// }
+
 
 	if (req->cmd_flags & REQ_FUA)
 		control |= NVME_RW_FUA;
@@ -946,6 +959,29 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 	cmnd->rw.reftag = 0;
 	cmnd->rw.apptag = 0;
 	cmnd->rw.appmask = 0;
+
+	// if (half_ftl) {
+	// 	// printk(KERN_ERR "inside half ftl");
+	// 	if (pri) {
+			// uint64_t old = nvme_sect_to_lba(ns->head, blk_rq_pos(req)); 
+			// uint64_t tmp = pri->phy_blk_addr;
+
+			// printk(KERN_ERR "first: %llx", tmp);
+			// tmp <<= 12;
+			// printk(KERN_ERR "second: %llx", tmp);
+			// tmp += old & (((uint64_t)1<<12)-1);
+			// printk(KERN_ERR "third: %llx", tmp);
+			
+			// cmnd->rw.slba = cpu_to_le64(tmp);
+
+			// printk(KERN_ERR "remapped: %llx => %llx", old, tmp);
+			// printk(KERN_ERR "		le64: %llx => %llx", cpu_to_le64(old), cpu_to_le64(tmp));
+			// cmnd->rw.cdw2 = pri->old_phy_blk_addr;
+			// cmnd->rw.cdw3 = pri->phy_blk_addr;
+
+			// printk(KERN_ERR "cdw2: %u  cdw3: %d", cmnd->rw.cdw2, cmnd->rw.cdw3);
+	// 	}
+	// }
 
 	if (ns->head->ms) {
 		/*
@@ -2847,6 +2883,9 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 	memcpy(subsys->model, id->mn, sizeof(subsys->model));
 	subsys->vendor_id = le16_to_cpu(id->vid);
 	subsys->cmic = id->cmic;
+
+	// ctrl->vendor_id = id->vid;
+	// printk("initialized vendored id %p %d\n", ctrl, id->vid);
 
 	/* Versions prior to 1.4 don't necessarily report a valid type */
 	if (id->cntrltype == NVME_CTRL_DISC ||
