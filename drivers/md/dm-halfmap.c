@@ -16,14 +16,35 @@
 
 #define DM_MSG_PREFIX "halfmap"
 
-#define SECTORS_PER_PAGE (8)
-#define SSD_CAPACITY (32 * 1024 * 1024 * 1024ULL)
-#define TOTAL_PHYSICAL_BLOCKS (8192)
-#define PAGES_PER_BLOCK (1024)
-#define ENTRY_SIZE (SSD_CAPACITY / 4096)
-#define INVALID_MAP (0xFFFFFFFF)
+#define HALFMAP_TEST
+
+#ifdef HALFMAP_TEST
+    #define SECTORS_PER_PAGE (8)
+    #define SSD_CAPACITY (32 * 1024 * 1024 * 1024ULL)
+    #define TOTAL_PHYSICAL_BLOCKS (8192 * 16)
+    #define PAGES_PER_BLOCK (1024/16)
+    #define ENTRY_SIZE (SSD_CAPACITY / 4096)
+    #define INVALID_MAP (0xFFFFFFFF)
+#else
+    #define SECTORS_PER_PAGE (8)
+    #define SSD_CAPACITY (32 * 1024 * 1024 * 1024ULL)
+    #define TOTAL_PHYSICAL_BLOCKS (8192)
+    #define PAGES_PER_BLOCK (1024)
+    #define ENTRY_SIZE (SSD_CAPACITY / 4096)
+    #define INVALID_MAP (0xFFFFFFFF)
+#endif
 
 #define next_multiple(x, base) (round_down((x), (base)) + (base))
+
+#define halfmap_debug(fmt, ...) do {           \
+    if (show_splitted) {               \
+        pr_err(fmt, ##__VA_ARGS__);   \
+    }                                  \
+} while (0)
+
+static bool show_splitted = false;
+module_param(show_splitted, bool, 0444);
+MODULE_PARM_DESC(show_splitted, "Whether to show splitted address or not");
 
 struct block_node {
     size_t idx;
@@ -212,6 +233,10 @@ static int alloc_block(struct block_manager *bm) {
 static block_offset_t reserve_block(struct block_manager *bm, size_t start, size_t size, size_t *reserved_size) {
     block_offset_t current_block;
 
+    // size_t cur;
+
+    
+    halfmap_debug("reserving: start=%zu size=%zu", start, size);
     spin_lock(&bm->cur_lock);
 
     if (bm->current_block == INVALID_MAP) {
@@ -229,8 +254,8 @@ static block_offset_t reserve_block(struct block_manager *bm, size_t start, size
         size_t end_page;
         size_t page_using;
 
-        start_page = round_down(start, SECTORS_PER_PAGE);
-        end_page = round_up(start + size, SECTORS_PER_PAGE);
+        start_page = round_down(start, SECTORS_PER_PAGE) / SECTORS_PER_PAGE;
+        end_page = round_up(start + size, SECTORS_PER_PAGE) / SECTORS_PER_PAGE;
         page_needed = end_page - start_page;
         available = PAGES_PER_BLOCK - bm->write_count[current_block];
 
@@ -350,11 +375,31 @@ static void halfmap_end_io(struct bio *bio)
     struct halfmap_private *pri = ap->private;
     struct halfmap_c *hc = tio->ti->private;
 
+    bool is_writing;
+
+    is_writing = bio_data_dir(bio) == WRITE;
+
     if (bio->bi_status) {
         pr_info("%s: orig bio status: %d => %d", __func__, tio->orig_bio->bi_status, bio->bi_status);
     }
 
-    hc->mapping->map[bio->bi_iter.bi_sector / SECTORS_PER_PAGE] = pri->phy_blk_addr;
+    if (is_writing) {
+        size_t start_page;
+        size_t cur_page;
+        size_t end_page;
+
+        start_page = bio->bi_iter.bi_sector / SECTORS_PER_PAGE;
+        end_page = (bio_end_sector(bio)-1) / SECTORS_PER_PAGE;
+    
+        for (cur_page = start_page; cur_page <= end_page; cur_page++) {
+            hc->mapping->map[cur_page] = pri->phy_blk_addr;
+        }
+
+        // halfmap_debug("end io pages: orig: %zu~%zu & %zu ~ %zu = %zu", 
+        //     bio->bi_iter.bi_sector, bio_end_sector(bio),
+        //     start_page, end_page, pri->phy_blk_addr);
+    }
+
 
     kfree(pri);
     kfree(ap);
@@ -371,6 +416,7 @@ static struct halfmap_private *private_for_write(struct halfmap_c *hc, size_t gr
 
     old_block = hc->mapping->map[group_start / SECTORS_PER_PAGE];
 
+    // halfmap_debug("map idx: %zu", group_start / SECTORS_PER_PAGE);
 
     new_block = reserve_block(hc->blk_mgr, group_start, group_size, reserved);
 
@@ -403,7 +449,6 @@ static struct halfmap_private *private_for_read(struct halfmap_c *hc, size_t gro
     pbn = hc->mapping->map[group_start / SECTORS_PER_PAGE];
 
     if (pbn == INVALID_MAP) {
-        // pr_info("%s: reading invalid block", __func__);
         pri->phy_blk_addr = INVALID_MAP;
         pri->old_phy_blk_addr = INVALID_MAP;
     } else {
@@ -425,13 +470,31 @@ static void submit_group(struct halfmap_c *hc, struct bio *bio, struct dm_target
 
     is_writing = bio_data_dir(bio) == WRITE;
 
+    halfmap_debug("group start: %zu  size: %zu", group_start, group_size);
+
     while (group_size) {
         if (is_writing) {
             pri = private_for_write(hc, group_start, group_size, &reserved);
+            halfmap_debug("from submit group: %s: %zu-%zu  new: %zu & old: %zu",
+                 is_writing ? "writ" : "read", group_start, group_start+reserved,
+                pri->phy_blk_addr, pri->old_phy_blk_addr);
         } else {
             pri = private_for_read(hc, group_start, group_size, &reserved);
+            // halfmap_debug("from submit group: %s: %zu-%zu  pri: %zu & %zu",
+            //     is_writing ? "writ" : "read", group_start, group_start+reserved,
+            //    pri->phy_blk_addr, pri->old_phy_blk_addr);
         }
 
+        if (reserved == 0) {
+            pr_err("%s: reserved is zero", __func__);
+        }
+
+        if (is_writing) {
+            halfmap_debug("reserved: %zu", reserved / SECTORS_PER_PAGE);
+        // halfmap_debug("first %zu  == %zu", group_start / (PAGES_PER_BLOCK * SECTORS_PER_PAGE),  (group_start + reserved - 1) / (PAGES_PER_BLOCK * SECTORS_PER_PAGE));
+        }
+        BUG_ON(group_start / (PAGES_PER_BLOCK * SECTORS_PER_PAGE) != (group_start + reserved - 1) / (PAGES_PER_BLOCK * SECTORS_PER_PAGE));
+        
         ap = kmalloc(sizeof(*ap), GFP_KERNEL);
         ap->shared = tio;
         ap->private = pri;
@@ -440,6 +503,8 @@ static void submit_group(struct halfmap_c *hc, struct bio *bio, struct dm_target
         if (splited_bio == NULL) {
             pr_err("%s: splited bio is NULL", __func__);
         }
+
+        // halfmap_debug("after splited: %zu-%zu", splited_bio->bi_iter.bi_sector, bio_end_sector(splited_bio));
         splited_bio->bi_private = ap;
         splited_bio->bi_end_io = halfmap_end_io;
         
@@ -463,9 +528,7 @@ static int halfmap_map(struct dm_target *ti, struct bio *bio)
     struct bio *clone;
     block_offset_t *map;
 
-    size_t start_page;
     size_t end_page;
-    size_t total_pages;
     size_t cur_page;
 
     size_t start_sector;
@@ -474,16 +537,10 @@ static int halfmap_map(struct dm_target *ti, struct bio *bio)
     size_t total_sectors;
 
     size_t group_start;
+    size_t group_start_page;
 
-    pr_info("calling from map");
+    halfmap_debug("calling from map");
 
-    // if (unlikely(bio->bi_iter.bi_sector % SECTORS_PER_PAGE || bio_sectors(bio) % SECTORS_PER_PAGE)) {
-    //     pr_err("Unaligned bio: addr: %llu  size: %d\n", (unsigned long long) bio->bi_iter.bi_sector, bio_sectors(bio));
-    //     bio_endio(bio);
-    //     return DM_MAPIO_KILL;
-    // }
-
-    BUG_ON(bio->bi_iter.bi_sector % SECTORS_PER_PAGE);
     
     tio = alloc_tio(ti, bio);
     if (tio == NULL) {
@@ -498,54 +555,41 @@ static int halfmap_map(struct dm_target *ti, struct bio *bio)
 
     map = hc->mapping->map;
 
-    total_pages = bio_sectors(clone) / SECTORS_PER_PAGE;
-    start_page = clone->bi_iter.bi_sector / SECTORS_PER_PAGE;
-    // end_page = start_page + total_pages;
 
-    end_page = next_multiple(clone->bi_iter.bi_sector+ bio_sectors(clone), SECTORS_PER_PAGE) / SECTORS_PER_PAGE;
+    end_page = next_multiple(bio_end_sector(clone), SECTORS_PER_PAGE) / SECTORS_PER_PAGE;
 
-    total_sectors = bio_sectors(clone);
     start_sector = clone->bi_iter.bi_sector;
-    end_sector = start_sector + total_sectors;
+    end_sector = bio_end_sector(clone);
     end_sector_align = next_multiple(end_sector, SECTORS_PER_PAGE);
 
     group_start = start_sector;
+    group_start_page = group_start / SECTORS_PER_PAGE;
 
+    total_sectors = end_sector - start_sector;
 
-    group_start = start_sector;
-    size_t group_start_page = round_down(group_start, SECTORS_PER_PAGE);
+    if (bio_data_dir(bio) == WRITE)
+        halfmap_debug("@@@ base split: orig: %zu-%zu type: %s total-sectors: %d", start_sector, end_sector, bio_data_dir(bio) == WRITE ? "Write" : "Read", total_sectors);
 
     for (cur_page = group_start_page+1; cur_page <= end_page; cur_page++) {
         if (cur_page == end_page || map[group_start_page] != map[cur_page]) {
             size_t group_end;
             size_t group_size;
 
-            if (cur_page * SECTORS_PER_PAGE >= end_sector) {
+            if (cur_page * SECTORS_PER_PAGE <= end_sector) {
                 group_end = cur_page * SECTORS_PER_PAGE;
             } else {
                 group_end = end_sector;
             }
 
             group_size = group_end - group_start;
-
             submit_group(hc, clone, tio, group_start, group_size);
 
             group_start = cur_page * SECTORS_PER_PAGE;
+            group_start_page = cur_page;
         }
     }
 
-
-    group_start = start_page;
- 
-    for (cur_page = start_page + 1; cur_page <= end_page; cur_page++) {
-        if (cur_page == end_page || hc->mapping->map[group_start] != hc->mapping->map[cur_page]) {
-            size_t group_size = cur_page - group_start;
-
-            submit_group(hc, clone, tio, group_start, group_size);
-
-            group_start = cur_page;
-        }
-    }   
+    halfmap_debug("");
 
     decre_tio(tio);
 
