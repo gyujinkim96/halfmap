@@ -442,7 +442,7 @@ static struct halfmap_private *private_for_read(struct halfmap_c *hc, size_t gro
 
     block_end = next_multiple(group_start, PAGES_PER_BLOCK * SECTORS_PER_PAGE);
 
-    chunk_size = min(block_end - group_start, group_size);
+    
 
     pri = kmalloc(sizeof(*pri), GFP_KERNEL);
 
@@ -451,9 +451,11 @@ static struct halfmap_private *private_for_read(struct halfmap_c *hc, size_t gro
     if (pbn == INVALID_MAP) {
         pri->phy_blk_addr = INVALID_MAP;
         pri->old_phy_blk_addr = INVALID_MAP;
+        chunk_size = group_size;
     } else {
         pri->phy_blk_addr = pbn;
         pri->old_phy_blk_addr = INVALID_MAP;
+        chunk_size = min(block_end - group_start, group_size);
     }
 
     *reserved = chunk_size;
@@ -480,9 +482,15 @@ static void submit_group(struct halfmap_c *hc, struct bio *bio, struct dm_target
                 pri->phy_blk_addr, pri->old_phy_blk_addr);
         } else {
             pri = private_for_read(hc, group_start, group_size, &reserved);
-            // halfmap_debug("from submit group: %s: %zu-%zu  pri: %zu & %zu",
-            //     is_writing ? "writ" : "read", group_start, group_start+reserved,
-            //    pri->phy_blk_addr, pri->old_phy_blk_addr);
+            if (pri->phy_blk_addr == INVALID_MAP) {
+                splited_bio = bio_next_split(bio, reserved, GFP_KERNEL, &fs_bio_set);
+                zero_fill_bio(splited_bio);
+                pr_err("call from zero");
+                bio_endio(splited_bio);
+                group_start += reserved;
+                group_size -= reserved;
+                continue;
+            }
         }
 
         if (reserved == 0) {
