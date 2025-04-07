@@ -180,3 +180,5 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+linux-source-6.8.0
+tools/bpf/bpftool/vmlinux
