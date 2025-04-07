@@ -232,13 +232,15 @@ static int alloc_block(struct block_manager *bm) {
 
 static block_offset_t reserve_block(struct block_manager *bm, size_t start, size_t size, size_t *reserved_size) {
     block_offset_t current_block;
+    size_t block_end;
 
-    // size_t cur;
+    block_end = next_multiple(start, PAGES_PER_BLOCK * SECTORS_PER_PAGE);
+
+    size_t cur;
 
     
-    halfmap_debug("reserving: start=%zu size=%zu", start, size);
     spin_lock(&bm->cur_lock);
-
+    
     if (bm->current_block == INVALID_MAP) {
         bm->current_block = alloc_block(bm);
     } 
@@ -254,11 +256,12 @@ static block_offset_t reserve_block(struct block_manager *bm, size_t start, size
         size_t end_page;
         size_t page_using;
 
-        start_page = round_down(start, SECTORS_PER_PAGE) / SECTORS_PER_PAGE;
-        end_page = round_up(start + size, SECTORS_PER_PAGE) / SECTORS_PER_PAGE;
-        page_needed = end_page - start_page;
-        available = PAGES_PER_BLOCK - bm->write_count[current_block];
-
+        start_page = start / SECTORS_PER_PAGE;
+        end_page = (start + size -1) / SECTORS_PER_PAGE;
+        page_needed = end_page - start_page + 1;
+        available = min((size_t) PAGES_PER_BLOCK - bm->write_count[current_block], PAGES_PER_BLOCK - (start_page % PAGES_PER_BLOCK));
+        cur = bm->write_count[current_block];
+        
         if (available >= page_needed) {
             page_using = page_needed;
             *reserved_size = size;
@@ -266,17 +269,21 @@ static block_offset_t reserve_block(struct block_manager *bm, size_t start, size
             page_using = available;
             *reserved_size = available * SECTORS_PER_PAGE;
         }
-    
+        
         bm->write_count[current_block] += page_using;
-    
+        
         if (bm->write_count[current_block] == PAGES_PER_BLOCK) {
             bm->current_block = INVALID_MAP;
-
+            
             append_to_full_list(bm, current_block);
         }
     }
-
+    
     spin_unlock(&bm->cur_lock);
+    
+
+    // pr_err("reserving: start=%zu size=%zu cur=%zu", start, size, cur);
+    
 
     return current_block; 
 }
@@ -485,7 +492,6 @@ static void submit_group(struct halfmap_c *hc, struct bio *bio, struct dm_target
             if (pri->phy_blk_addr == INVALID_MAP) {
                 splited_bio = bio_next_split(bio, reserved, GFP_KERNEL, &fs_bio_set);
                 zero_fill_bio(splited_bio);
-                pr_err("call from zero");
                 bio_endio(splited_bio);
                 group_start += reserved;
                 group_size -= reserved;
@@ -501,7 +507,17 @@ static void submit_group(struct halfmap_c *hc, struct bio *bio, struct dm_target
             halfmap_debug("reserved: %zu", reserved / SECTORS_PER_PAGE);
         // halfmap_debug("first %zu  == %zu", group_start / (PAGES_PER_BLOCK * SECTORS_PER_PAGE),  (group_start + reserved - 1) / (PAGES_PER_BLOCK * SECTORS_PER_PAGE));
         }
-        BUG_ON(group_start / (PAGES_PER_BLOCK * SECTORS_PER_PAGE) != (group_start + reserved - 1) / (PAGES_PER_BLOCK * SECTORS_PER_PAGE));
+
+        
+        if (group_start / (PAGES_PER_BLOCK * SECTORS_PER_PAGE) != (group_start + reserved - 1) / (PAGES_PER_BLOCK * SECTORS_PER_PAGE)) {
+            pr_err("BUG: group_start=%zu, reserved=%zu, group_end=%zu, pages_per_block=%zu, sectors_per_page=%d\n",
+                   group_start,
+                   reserved,
+                   group_start + reserved - 1,
+                   PAGES_PER_BLOCK,
+                   SECTORS_PER_PAGE);
+            BUG();
+        }
         
         ap = kmalloc(sizeof(*ap), GFP_KERNEL);
         ap->shared = tio;
