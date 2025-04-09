@@ -6,8 +6,8 @@
 
 typedef uint32_t block_offset_t;
 struct halfmap_private {
-    block_offset_t old_phy_blk_addr;
-    block_offset_t phy_blk_addr;
+    block_offset_t old_blk_addr;
+    block_offset_t new_blk_addr;
 };
 
 #endif
